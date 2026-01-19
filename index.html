@@ -79,6 +79,7 @@
         let anchorCube = null;  // 起点方块（红）
         let endCube = null;     // 终点方块（绿）- 新增全局变量以便清除
         let dynamicLine = null;
+        let directionArrow = null;  // 方向箭头
 
         // --- 3D 浮动标签变量 ---
         let hudSprite = null;
@@ -107,7 +108,15 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
 
+            renderer.xr.addEventListener('sessionstart', () => {
+                // 进入XR空间时显示方向箭头
+                if (directionArrow) {
+                    directionArrow.visible = true;
+                }
+            });
+
             renderer.xr.addEventListener('sessionend', () => {
+  
                 if (dataBuffer.length > 0 && !window.hasDownloaded) {
                     downloadCSV();
                     window.hasDownloaded = true;
@@ -130,6 +139,14 @@
             const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -0.5)]);
             const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.5, transparent: true }));
             controller.add(line);
+
+            // --- 创建方向箭头 --- 
+            const arrowDir = new THREE.Vector3(0, 0, -1); // 朝向正前方
+            const arrowOrigin = new THREE.Vector3(0, 1.6, 2); // 显示在用户前方2米处
+            const arrowLength = 0.5; // 箭头长度
+            const arrowColor = 0x00ff00; // 箭头颜色
+            directionArrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, arrowLength, arrowColor, 0.1, 0.05);
+            scene.add(directionArrow);
 
             // --- 初始化动态测量线 ---
             const measureLineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
@@ -229,6 +246,26 @@
         }
 
         function render() {
+            // --- 更新方向箭头位置 --- 
+            if (directionArrow && directionArrow.visible) {
+                // 获取相机位置
+                const cameraPos = new THREE.Vector3();
+                camera.getWorldPosition(cameraPos);
+                
+                // 获取相机朝向
+                const cameraDir = new THREE.Vector3();
+                camera.getWorldDirection(cameraDir);
+                
+                // 计算箭头位置：在相机前方2米处
+                const arrowPos = cameraPos.clone().add(cameraDir.multiplyScalar(2));
+                
+                // 更新箭头位置
+                directionArrow.position.copy(arrowPos);
+                
+                // 确保箭头朝向与相机前方一致（90度方向）
+                directionArrow.setDirection(cameraDir);
+            }
+
             if (isRecording && controller && anchorPoint) {
                 const now = Date.now();
                 const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
