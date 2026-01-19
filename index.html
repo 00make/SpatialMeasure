@@ -5,6 +5,8 @@
     <title>Quest 3 离线测量工具</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <link rel="manifest" href="./manifest.json">
+    <meta name="theme-color" content="#333333">
     <link type="text/css" rel="stylesheet" href="./static/css/main.css">
     <style>
         #info {
@@ -43,6 +45,18 @@
     </script>
 
     <script type="module">
+        // --- PWA Service Worker 注册 ---
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                navigator.serviceWorker.register('./sw.js').then((reg) => {
+                    console.log('离线服务启动成功: ', reg.scope);
+                }, (err) => {
+                    console.log('离线服务启动失败: ', err);
+                });
+            });
+        }
+        // -----------------------------
+
         import * as THREE from 'three';
         import { XRButton } from 'three/addons/webxr/XRButton.js';
 
