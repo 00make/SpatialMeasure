@@ -2,7 +2,7 @@
 <html lang="zh">
 
 <head>
-    <title>Quest 3 离线测量工具</title>
+    <title>Quest 3 离线测量工具 (Pro)</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <link rel="manifest" href="./manifest.json">
@@ -10,49 +10,56 @@
     <link type="text/css" rel="stylesheet" href="./static/css/main.css">
     <style>
         #info {
-            background: rgba(0, 0, 0, 0.5);
-            font-size: 16px;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 10px;
+            font-size: 14px;
             bottom: 20px;
             top: auto;
             pointer-events: none;
-            /* 让点击穿透 */
             user-select: none;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            /* 允许换行 */
         }
 
-        /* 状态显示优化 */
         #status {
             font-size: 18px;
             font-weight: bold;
             color: #00ff00;
         }
 
-        /* 屏幕右上角的保存按钮（备用） */
+        #realtime-data {
+            color: #ffff00;
+            font-family: monospace;
+            margin-top: 5px;
+        }
+
+        /* 强制覆盖右上角按钮样式 */
         #save-btn {
             position: absolute;
             top: 20px;
             right: 20px;
-            padding: 10px 20px;
+            padding: 12px 24px;
             background: #2196F3;
             color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: 8px;
             font-size: 16px;
             z-index: 999;
             pointer-events: auto;
-            /* 允许点击 */
             cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
         }
     </style>
 </head>
 
 <body>
     <div id="info">
-        <span id="status">准备就绪 - 请点击 "START XR"</span>
-        <br>
-        <span id="instruction" style="font-size: 12px; color: #ccc;">操作：扳机键打点，两点确定一条线</span>
+        <div id="status">就绪 - 点击扳机键设定锚点</div>
+        <div id="realtime-data">等待测量...</div>
     </div>
 
-    <button id="save-btn" onclick="downloadCSV()">下载数据</button>
+    <button id="save-btn" onclick="downloadCSV()">手动下载数据</button>
 
     <script type="importmap">
         {
@@ -64,14 +71,13 @@
     </script>
 
     <script type="module">
-        // --- 1. PWA 离线缓存注册 ---
+        // --- PWA Service Worker ---
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('./sw.js');
             });
         }
 
-        // --- 2. 核心逻辑 ---
         import * as THREE from 'three';
         import { XRButton } from 'three/addons/webxr/XRButton.js';
 
@@ -79,16 +85,16 @@
         let camera, scene, renderer;
         let controller;
 
-        // 测量状态变量
-        let measureState = 0; // 0: 等待起点, 1: 等待终点
-        let startPoint = null;
-        let endPoint = null;
-        let startCube = null;
-        let endCube = null;
-        let measureLine = null;
+        // --- 核心状态变量 ---
+        let isRecording = false;    // 是否正在录制中
+        let anchorPoint = null;     // 锚点（起点/原点）
+        let anchorCube = null;      // 锚点的视觉方块
+        let dynamicLine = null;     // 动态连线
 
-        // 数据存储变量
-        let measurementRecords = [];
+        // --- 数据录制变量 ---
+        let dataBuffer = [];        // 内存中的数据缓存
+        let lastRecordTime = 0;     // 上一次记录的时间戳
+        const RECORD_INTERVAL = 50; // 核心需求：50ms 记录一次
 
         init();
         animate();
@@ -98,8 +104,7 @@
             document.body.appendChild(container);
 
             scene = new THREE.Scene();
-            // 关键修复：AR 模式下背景必须是 null (透明)，不能设颜色！
-            // scene.background = new THREE.Color(0x333333); <--- 这一行删掉了
+            // 注意：AR 模式下背景必须透明，不要设置 scene.background
 
             camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
             camera.position.set(0, 1.6, 3);
@@ -109,15 +114,15 @@
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
 
-            // 监听 Session 结束事件，自动保存数据
+            // 意外退出 Session 时自动保存
             renderer.xr.addEventListener('sessionend', () => {
-                updateStatus("会话结束，正在保存数据...");
-                downloadCSV();
+                if (dataBuffer.length > 0) {
+                    downloadCSV();
+                }
             });
 
             container.appendChild(renderer.domElement);
 
-            // 添加 WebXR 按钮
             document.body.appendChild(XRButton.createButton(renderer, {
                 optionalFeatures: ['depth-sensing', 'dom-overlay'],
                 domOverlay: { root: document.body }
@@ -125,147 +130,178 @@
 
             // --- 控制器设置 ---
             controller = renderer.xr.getController(0);
-            controller.addEventListener('select', onSelect); // 改回用 select 事件（点击）
+            controller.addEventListener('select', onTrigger); // 绑定扳机事件
             scene.add(controller);
 
-            // 给控制器加个简单的红线，方便看指向
-            const geometry = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -0.5)]);
-            const line = new THREE.Line(geometry);
-            line.scale.z = 5;
+            // 控制器视觉射线
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -0.5)]);
+            const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.5, transparent: true }));
             controller.add(line);
 
-            // 初始化测量线对象（一开始隐藏）
-            const lineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 3 });
-            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
-            measureLine = new THREE.Line(lineGeo, lineMat);
-            measureLine.frustumCulled = false; // 防止看不见
-            scene.add(measureLine);
+            // --- 初始化动态测量线 ---
+            // 这条线会从锚点连接到当前手柄位置
+            const measureLineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
+            const measureLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
+            dynamicLine = new THREE.Line(measureLineGeo, measureLineMat);
+            dynamicLine.frustumCulled = false; // 避免视角外消失
+            dynamicLine.visible = false;       // 默认隐藏
+            scene.add(dynamicLine);
 
             window.addEventListener('resize', onWindowResize);
-
-            // 全局暴露下载函数给按钮用
-            window.downloadCSV = downloadCSV;
+            window.downloadCSV = downloadCSV; // 暴露给全局按钮
         }
 
         // --- 核心交互逻辑 ---
-
-        function onSelect() {
-            // 获取当前手柄的位置
+        function onTrigger() {
+            // 获取当前手柄的世界坐标
             const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
-            if (measureState === 0) {
-                // --- 步骤 1: 放置起点 ---
-                cleanScene(); // 清理上一轮的方块
+            if (!isRecording) {
+                // === 开始录制 ===
+                isRecording = true;
+                dataBuffer = []; // 清空旧数据
 
-                startPoint = currentPos.clone();
-                startCube = createCube(startPoint, 0xff0000); // 红色起点
-                scene.add(startCube);
+                // 1. 设置锚点
+                anchorPoint = currentPos.clone();
 
-                measureState = 1;
-                updateStatus("起点已定，请点击放置终点");
+                // 2. 生成视觉反馈（红色方块）
+                if (anchorCube) scene.remove(anchorCube);
+                anchorCube = createCube(anchorPoint, 0xff0000);
+                scene.add(anchorCube);
 
-            } else if (measureState === 1) {
-                // --- 步骤 2: 放置终点并计算 ---
-                endPoint = currentPos.clone();
-                endCube = createCube(endPoint, 0x00ff00); // 绿色终点
+                // 3. 显示连线
+                dynamicLine.visible = true;
+
+                updateStatus("🔴 录制中... (每50ms采样)");
+
+            } else {
+                // === 停止录制 ===
+                isRecording = false;
+
+                // 1. 放置终点方块（绿色），标记结束位置
+                const endCube = createCube(currentPos, 0x00ff00);
                 scene.add(endCube);
 
-                // 画线
-                measureLine.geometry.setFromPoints([startPoint, endPoint]);
-                measureLine.visible = true;
+                // 2. 停止连线更新（定格）
+                updateLine(anchorPoint, currentPos);
 
-                // 执行计算
-                const result = calculateData(startPoint, endPoint);
+                updateStatus("✅ 录制结束，正在保存...");
 
-                // 保存数据到内存
-                saveToMemory(result);
-
-                // 更新UI显示
-                const infoText = `距离: ${result.dist}m | 俯仰: ${result.pitch}° | 方位: ${result.yaw}°`;
-                updateStatus(infoText);
-
-                measureState = 0; // 重置状态，准备下一次测量
+                // 3. 立即下载数据
+                downloadCSV();
             }
         }
 
-        // 生成小方块的辅助函数
-        function createCube(pos, colorHex) {
-            const geometry = new THREE.BoxGeometry(0.05, 0.05, 0.05); // 5cm 方块
-            const material = new THREE.MeshBasicMaterial({ color: colorHex });
+        // --- 每一帧的循环逻辑 ---
+        function render() {
+            if (isRecording && controller && anchorPoint) {
+                const now = Date.now();
+                const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
+
+                // 1. 视觉更新：每一帧都画线，保证流畅
+                updateLine(anchorPoint, currentPos);
+
+                // 2. 数据计算：计算相对锚点的关系
+                const data = calculateRelativeData(anchorPoint, currentPos);
+
+                // 3. 界面更新：实时显示数值
+                document.getElementById('realtime-data').innerText =
+                    `距离: ${data.dist}m\n俯仰: ${data.pitch}°\n方位: ${data.yaw}°`;
+
+                // 4. 数据记录：每 50ms 存一次 (Throttle)
+                if (now - lastRecordTime >= RECORD_INTERVAL) {
+                    saveDataPoint(data);
+                    lastRecordTime = now;
+                }
+            }
+            renderer.render(scene, camera);
+        }
+
+        // --- 核心数学计算 (完全复刻 Python 逻辑) ---
+        function calculateRelativeData(pStart, pCurrent) {
+            // 计算方向向量
+            const direction = new THREE.Vector3().subVectors(pCurrent, pStart);
+            const dist = direction.length();
+
+            // 归一化用于计算角度
+            direction.normalize();
+
+            // Pitch (俯仰角): asin(y)
+            const pitch = THREE.MathUtils.radToDeg(Math.asin(direction.y));
+
+            // Yaw (方位角): atan2(z, x) -> 注意 ThreeJS 坐标系
+            // 通常在 AR 中，我们需要根据实际重力方向调整，但这里沿用标准数学定义
+            const yaw = THREE.MathUtils.radToDeg(Math.atan2(direction.z, direction.x));
+
+            return {
+                dist: dist.toFixed(4),
+                pitch: pitch.toFixed(2),
+                yaw: yaw.toFixed(2)
+            };
+        }
+
+        // --- 内存数据存储 ---
+        function saveDataPoint(data) {
+            const now = new Date();
+            // 生成带毫秒的时间戳 HH:MM:SS.mmm
+            const timeStr = now.toLocaleTimeString('en-GB') + '.' + String(now.getMilliseconds()).padStart(3, '0');
+
+            dataBuffer.push({
+                timestamp: timeStr,
+                dist: data.dist,
+                pitch: data.pitch,
+                yaw: data.yaw
+            });
+        }
+
+        // --- 辅助函数 ---
+        function updateLine(p1, p2) {
+            const positions = dynamicLine.geometry.attributes.position.array;
+            // 起点
+            positions[0] = p1.x; positions[1] = p1.y; positions[2] = p1.z;
+            // 终点
+            positions[3] = p2.x; positions[4] = p2.y; positions[5] = p2.z;
+            dynamicLine.geometry.attributes.position.needsUpdate = true;
+        }
+
+        function createCube(pos, color) {
+            const geometry = new THREE.BoxGeometry(0.05, 0.05, 0.05);
+            const material = new THREE.MeshBasicMaterial({ color: color });
             const cube = new THREE.Mesh(geometry, material);
             cube.position.copy(pos);
             return cube;
         }
 
-        // 清理场景
-        function cleanScene() {
-            if (startCube) scene.remove(startCube);
-            if (endCube) scene.remove(endCube);
-            if (measureLine) measureLine.visible = false;
-            startCube = null;
-            endCube = null;
+        function updateStatus(msg) {
+            document.getElementById('status').innerText = msg;
         }
 
-        // --- 核心算法 (搬运自你原来的逻辑) ---
-        function calculateData(p1, p2) {
-            const direction = new THREE.Vector3().subVectors(p2, p1).normalize();
-
-            // 1. 距离
-            const dist = p1.distanceTo(p2).toFixed(3);
-
-            // 2. 俯仰角 (Pitch)
-            const pitch = THREE.MathUtils.radToDeg(Math.asin(direction.y)).toFixed(2);
-
-            // 3. 方位角 (Yaw)
-            const yaw = THREE.MathUtils.radToDeg(Math.atan2(direction.z, direction.x)).toFixed(2);
-
-            return { dist, pitch, yaw };
-        }
-
-        function saveToMemory(data) {
-            const now = new Date();
-            const timeStr = now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds();
-
-            measurementRecords.push({
-                time: timeStr,
-                distance: data.dist,
-                pitch: data.pitch,
-                yaw: data.yaw
-            });
-            console.log("数据已缓存:", measurementRecords);
-        }
-
-        // --- 导出 CSV 功能 ---
+        // --- 文件导出 ---
         function downloadCSV() {
-            if (measurementRecords.length === 0) {
-                updateStatus("没有数据可下载");
+            if (dataBuffer.length === 0) {
+                updateStatus("⚠️ 没有数据可保存");
                 return;
             }
 
-            let csvContent = "Time,Distance(m),Pitch(deg),Yaw(deg)\n";
-
-            measurementRecords.forEach(row => {
-                csvContent += `${row.time},${row.distance},${row.pitch},${row.yaw}\n`;
+            let csvContent = "Timestamp,Distance(m),Pitch(deg),Yaw(deg)\n";
+            dataBuffer.forEach(row => {
+                csvContent += `${row.timestamp},${row.dist},${row.pitch},${row.yaw}\n`;
             });
 
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-            const link = document.createElement("a");
             const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
 
-            const fileName = `measure_report_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+            const fileName = `quest_track_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
 
-            link.setAttribute("href", url);
-            link.setAttribute("download", fileName);
+            link.href = url;
+            link.download = fileName;
             link.style.visibility = 'hidden';
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
 
-            updateStatus(`已保存文件: ${fileName}`);
-        }
-
-        function updateStatus(msg) {
-            document.getElementById('status').innerText = msg;
+            updateStatus(`✅ 数据已保存: ${fileName}`);
         }
 
         function onWindowResize() {
@@ -276,10 +312,6 @@
 
         function animate() {
             renderer.setAnimationLoop(render);
-        }
-
-        function render() {
-            renderer.render(scene, camera);
         }
     </script>
 </body>
