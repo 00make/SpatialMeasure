@@ -108,7 +108,10 @@
             renderer.xr.enabled = true;
 
             renderer.xr.addEventListener('sessionend', () => {
-                if (dataBuffer.length > 0) downloadCSV();
+                if (dataBuffer.length > 0 && !window.hasDownloaded) {
+                    downloadCSV();
+                    window.hasDownloaded = true;
+                }
             });
 
             container.appendChild(renderer.domElement);
@@ -221,6 +224,7 @@
 
                 updateStatus("✅ 录制完成，正在下载...");
                 downloadCSV();
+                window.hasDownloaded = true;
             }
         }
 
@@ -300,7 +304,17 @@
             const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement("a");
             link.href = URL.createObjectURL(blob);
-            link.download = `quest_track_${Date.now()}.csv`;
+            
+            // 使用标准日期时间格式：YYYY-MM-DD_HH-mm-ss
+            const now = new Date();
+            const dateStr = now.getFullYear() + '-' + 
+                           String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                           String(now.getDate()).padStart(2, '0') + '_' +
+                           String(now.getHours()).padStart(2, '0') + '-' +
+                           String(now.getMinutes()).padStart(2, '0') + '-' +
+                           String(now.getSeconds()).padStart(2, '0');
+            
+            link.download = `quest_track_${dateStr}.csv`;
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
