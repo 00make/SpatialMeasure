@@ -2,14 +2,13 @@
 <html lang="zh">
 
 <head>
-    <title>Quest 3 空间测量 Pro (3D HUD版)</title>
+    <title>Quest 3 空间测量 Pro (透明版)</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <link rel="manifest" href="./manifest.json">
     <meta name="theme-color" content="#333333">
     <link type="text/css" rel="stylesheet" href="./static/css/main.css">
     <style>
-        /* 2D UI 只保留最基础的状态提示，数据全部移到 3D 空间 */
         #info {
             background: rgba(0, 0, 0, 0.3);
             padding: 10px;
@@ -77,7 +76,8 @@
         // --- 业务变量 ---
         let isRecording = false;
         let anchorPoint = null;
-        let anchorCube = null;
+        let anchorCube = null;  // 起点方块（红）
+        let endCube = null;     // 终点方块（绿）- 新增全局变量以便清除
         let dynamicLine = null;
 
         // --- 3D 浮动标签变量 ---
@@ -87,7 +87,7 @@
         // --- 数据录制变量 ---
         let dataBuffer = [];
         let lastRecordTime = 0;
-        const RECORD_INTERVAL = 50; // 50ms 采样率
+        const RECORD_INTERVAL = 50;
 
         init();
         animate();
@@ -97,7 +97,7 @@
             document.body.appendChild(container);
 
             scene = new THREE.Scene();
-            // AR 模式背景透明
+            // AR 模式背景透明，无 scene.background
 
             camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
             camera.position.set(0, 1.6, 3);
@@ -145,49 +145,36 @@
 
         // --- 创建 3D 文字标签系统 ---
         function initHUD() {
-            // 1. 创建 Canvas
             hudCanvas = document.createElement('canvas');
-            hudCanvas.width = 512;  // 分辨率越高越清晰
+            hudCanvas.width = 512;
             hudCanvas.height = 256;
             hudContext = hudCanvas.getContext('2d');
-
-            // 2. 创建 Texture
             hudTexture = new THREE.CanvasTexture(hudCanvas);
-
-            // 3. 创建 Sprite Material
             const spriteMaterial = new THREE.SpriteMaterial({ map: hudTexture, transparent: true });
-
-            // 4. 创建 Sprite 对象
             hudSprite = new THREE.Sprite(spriteMaterial);
-            hudSprite.scale.set(0.3, 0.15, 1); // 控制标签在 3D 空间的大小 (宽0.3米, 高0.15米)
-            hudSprite.visible = false; // 默认隐藏
+            hudSprite.scale.set(0.3, 0.15, 1);
+            hudSprite.visible = false;
             scene.add(hudSprite);
         }
 
-        // --- 更新 3D 标签的内容 ---
         function updateHUD(data, position) {
-            // 清空 Canvas
             hudContext.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
 
-            // 绘制半透明黑色背景框
-            hudContext.fillStyle = 'rgba(0, 0, 0, 0.6)';
-            hudContext.roundRect(10, 10, 492, 236, 30); // 圆角矩形
+            // 背景框稍微淡一点
+            hudContext.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            hudContext.roundRect(10, 10, 492, 236, 30);
             hudContext.fill();
 
-            // 绘制文字
             hudContext.fillStyle = '#ffffff';
             hudContext.font = 'bold 50px Arial';
             hudContext.textAlign = 'left';
 
-            // 逐行绘制
             hudContext.fillText(`Dist:  ${data.dist} m`, 40, 80);
             hudContext.fillText(`Pitch: ${data.pitch}°`, 40, 150);
             hudContext.fillText(`Yaw:   ${data.yaw}°`, 40, 220);
 
-            // 告诉 Three.js 纹理更新了
             hudTexture.needsUpdate = true;
 
-            // 更新 Sprite 位置：位于控制器上方 20cm 处
             hudSprite.position.copy(position);
             hudSprite.position.y += 0.2;
             hudSprite.visible = true;
@@ -198,30 +185,39 @@
             const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
             if (!isRecording) {
-                // === 开始 ===
+                // === 开始录制 (锚点设定) ===
                 isRecording = true;
                 dataBuffer = [];
 
-                // 1. 设定锚点
+                // 1. 【修改点】清除上一轮的方块（如果有）
+                if (anchorCube) {
+                    scene.remove(anchorCube);
+                    anchorCube = null;
+                }
+                if (endCube) {
+                    scene.remove(endCube);
+                    endCube = null;
+                }
+
+                // 2. 设定新锚点
                 anchorPoint = currentPos.clone();
-                if (anchorCube) scene.remove(anchorCube);
-                anchorCube = createCube(anchorPoint, 0xff0000);
+                anchorCube = createCube(anchorPoint, 0xff0000); // 红色半透明
                 scene.add(anchorCube);
 
                 dynamicLine.visible = true;
                 updateStatus("🔴 录制中...");
 
             } else {
-                // === 结束 ===
+                // === 结束录制 ===
                 isRecording = false;
 
-                // 放置终点
-                const endCube = createCube(currentPos, 0x00ff00);
+                // 3. 放置终点
+                endCube = createCube(currentPos, 0x00ff00); // 绿色半透明
                 scene.add(endCube);
 
-                // 冻结线段和标签
+                // 冻结
                 updateLine(anchorPoint, currentPos);
-                hudSprite.visible = false; // 结束时隐藏标签，或者你可以选择保留
+                hudSprite.visible = false;
 
                 updateStatus("✅ 录制完成，正在下载...");
                 downloadCSV();
@@ -233,16 +229,12 @@
                 const now = Date.now();
                 const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
-                // 1. 视觉更新
                 updateLine(anchorPoint, currentPos);
 
-                // 2. 计算数据
                 const data = calculateRelativeData(anchorPoint, currentPos);
 
-                // 3. 【关键】更新 3D 空间浮动标签
                 updateHUD(data, currentPos);
 
-                // 4. 数据记录 (50ms)
                 if (now - lastRecordTime >= RECORD_INTERVAL) {
                     saveDataPoint(data);
                     lastRecordTime = now;
@@ -251,7 +243,6 @@
             renderer.render(scene, camera);
         }
 
-        // --- 计算逻辑 ---
         function calculateRelativeData(pStart, pCurrent) {
             const direction = new THREE.Vector3().subVectors(pCurrent, pStart);
             const dist = direction.length();
@@ -261,7 +252,7 @@
             const yaw = THREE.MathUtils.radToDeg(Math.atan2(direction.z, direction.x));
 
             return {
-                dist: dist.toFixed(3), // 3位小数
+                dist: dist.toFixed(3),
                 pitch: pitch.toFixed(1),
                 yaw: yaw.toFixed(1)
             };
@@ -280,9 +271,15 @@
             dynamicLine.geometry.attributes.position.needsUpdate = true;
         }
 
+        // --- 【修改点】支持半透明方块 ---
         function createCube(pos, color) {
             const geo = new THREE.BoxGeometry(0.05, 0.05, 0.05);
-            const mat = new THREE.MeshBasicMaterial({ color: color });
+            // 这里增加了 transparent 和 opacity
+            const mat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.5
+            });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.position.copy(pos);
             return mesh;
