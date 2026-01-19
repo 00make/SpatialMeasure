@@ -14,10 +14,11 @@
             font-size: 16px;
             bottom: 20px;
             top: auto;
-            pointer-events: none; /* 让点击穿透 */
+            pointer-events: none;
+            /* 让点击穿透 */
             user-select: none;
         }
-        
+
         /* 状态显示优化 */
         #status {
             font-size: 18px;
@@ -37,7 +38,8 @@
             border-radius: 5px;
             font-size: 16px;
             z-index: 999;
-            pointer-events: auto; /* 允许点击 */
+            pointer-events: auto;
+            /* 允许点击 */
             cursor: pointer;
         }
     </style>
@@ -68,7 +70,7 @@
                 navigator.serviceWorker.register('./sw.js');
             });
         }
-        
+
         // --- 2. 核心逻辑 ---
         import * as THREE from 'three';
         import { XRButton } from 'three/addons/webxr/XRButton.js';
@@ -76,7 +78,7 @@
         let container;
         let camera, scene, renderer;
         let controller;
-        
+
         // 测量状态变量
         let measureState = 0; // 0: 等待起点, 1: 等待终点
         let startPoint = null;
@@ -84,9 +86,9 @@
         let startCube = null;
         let endCube = null;
         let measureLine = null;
-        
+
         // 数据存储变量
-        let measurementRecords = []; 
+        let measurementRecords = [];
 
         init();
         animate();
@@ -106,7 +108,7 @@
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.xr.enabled = true;
-            
+
             // 监听 Session 结束事件，自动保存数据
             renderer.xr.addEventListener('sessionend', () => {
                 updateStatus("会话结束，正在保存数据...");
@@ -131,16 +133,16 @@
             const line = new THREE.Line(geometry);
             line.scale.z = 5;
             controller.add(line);
-            
+
             // 初始化测量线对象（一开始隐藏）
             const lineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 3 });
-            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0,0)]);
+            const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
             measureLine = new THREE.Line(lineGeo, lineMat);
             measureLine.frustumCulled = false; // 防止看不见
             scene.add(measureLine);
 
             window.addEventListener('resize', onWindowResize);
-            
+
             // 全局暴露下载函数给按钮用
             window.downloadCSV = downloadCSV;
         }
@@ -154,38 +156,38 @@
             if (measureState === 0) {
                 // --- 步骤 1: 放置起点 ---
                 cleanScene(); // 清理上一轮的方块
-                
+
                 startPoint = currentPos.clone();
                 startCube = createCube(startPoint, 0xff0000); // 红色起点
                 scene.add(startCube);
-                
+
                 measureState = 1;
                 updateStatus("起点已定，请点击放置终点");
-                
+
             } else if (measureState === 1) {
                 // --- 步骤 2: 放置终点并计算 ---
                 endPoint = currentPos.clone();
                 endCube = createCube(endPoint, 0x00ff00); // 绿色终点
                 scene.add(endCube);
-                
+
                 // 画线
                 measureLine.geometry.setFromPoints([startPoint, endPoint]);
                 measureLine.visible = true;
-                
+
                 // 执行计算
                 const result = calculateData(startPoint, endPoint);
-                
+
                 // 保存数据到内存
                 saveToMemory(result);
-                
+
                 // 更新UI显示
                 const infoText = `距离: ${result.dist}m | 俯仰: ${result.pitch}° | 方位: ${result.yaw}°`;
                 updateStatus(infoText);
-                
+
                 measureState = 0; // 重置状态，准备下一次测量
             }
         }
-        
+
         // 生成小方块的辅助函数
         function createCube(pos, colorHex) {
             const geometry = new THREE.BoxGeometry(0.05, 0.05, 0.05); // 5cm 方块
@@ -194,12 +196,12 @@
             cube.position.copy(pos);
             return cube;
         }
-        
+
         // 清理场景
         function cleanScene() {
-            if(startCube) scene.remove(startCube);
-            if(endCube) scene.remove(endCube);
-            if(measureLine) measureLine.visible = false;
+            if (startCube) scene.remove(startCube);
+            if (endCube) scene.remove(endCube);
+            if (measureLine) measureLine.visible = false;
             startCube = null;
             endCube = null;
         }
@@ -207,23 +209,23 @@
         // --- 核心算法 (搬运自你原来的逻辑) ---
         function calculateData(p1, p2) {
             const direction = new THREE.Vector3().subVectors(p2, p1).normalize();
-            
+
             // 1. 距离
             const dist = p1.distanceTo(p2).toFixed(3);
-            
+
             // 2. 俯仰角 (Pitch)
             const pitch = THREE.MathUtils.radToDeg(Math.asin(direction.y)).toFixed(2);
-            
+
             // 3. 方位角 (Yaw)
             const yaw = THREE.MathUtils.radToDeg(Math.atan2(direction.z, direction.x)).toFixed(2);
-            
+
             return { dist, pitch, yaw };
         }
 
         function saveToMemory(data) {
             const now = new Date();
             const timeStr = now.getHours() + ":" + now.getMinutes() + ":" + now.getSeconds();
-            
+
             measurementRecords.push({
                 time: timeStr,
                 distance: data.dist,
@@ -241,7 +243,7 @@
             }
 
             let csvContent = "Time,Distance(m),Pitch(deg),Yaw(deg)\n";
-            
+
             measurementRecords.forEach(row => {
                 csvContent += `${row.time},${row.distance},${row.pitch},${row.yaw}\n`;
             });
@@ -249,16 +251,16 @@
             const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
             const link = document.createElement("a");
             const url = URL.createObjectURL(blob);
-            
-            const fileName = `measure_report_${new Date().toISOString().slice(0,19).replace(/:/g,"-")}.csv`;
-            
+
+            const fileName = `measure_report_${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.csv`;
+
             link.setAttribute("href", url);
             link.setAttribute("download", fileName);
             link.style.visibility = 'hidden';
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-            
+
             updateStatus(`已保存文件: ${fileName}`);
         }
 
@@ -281,4 +283,5 @@
         }
     </script>
 </body>
+
 </html>
