@@ -2,7 +2,7 @@
 <html lang="zh">
 
 <head>
-    <title>Quest 3 空间测量 Pro (透明版)</title>
+    <title>Quest 3 空间测量 (硬盘直写版)</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <link rel="manifest" href="./manifest.json">
@@ -10,7 +10,7 @@
     <link type="text/css" rel="stylesheet" href="./static/css/main.css">
     <style>
         #info {
-            background: rgba(0, 0, 0, 0.3);
+            background: rgba(0, 0, 0, 0.6);
             padding: 10px;
             font-size: 14px;
             bottom: 20px;
@@ -25,31 +25,41 @@
             color: #00ff00;
             text-shadow: 1px 1px 2px black;
         }
+        
+        #file-status {
+            margin-top: 5px;
+            color: #ffff00;
+            font-size: 14px;
+        }
 
-        #save-btn {
+        /* 放在显眼位置的文件选择按钮 */
+        #setup-btn {
             position: absolute;
-            top: 20px;
-            right: 20px;
-            padding: 12px 24px;
-            background: #2196F3;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px 40px;
+            background: #FF5722; /* 橙色醒目 */
             color: white;
             border: none;
-            border-radius: 8px;
-            font-size: 16px;
+            border-radius: 12px;
+            font-size: 20px;
+            font-weight: bold;
             z-index: 999;
             pointer-events: auto;
             cursor: pointer;
-            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
         }
     </style>
 </head>
 
 <body>
-    <div id="info">
-        <div id="status">就绪 - 点击扳机键设定锚点</div>
-    </div>
+    <button id="setup-btn" onclick="setupFileHandle()">第一步：选择保存文件</button>
 
-    <button id="save-btn" onclick="downloadCSV()">下载数据</button>
+    <div id="info">
+        <div id="status">请先配置保存文件...</div>
+        <div id="file-status">未连接文件</div>
+    </div>
 
     <script type="importmap">
         {
@@ -76,22 +86,63 @@
         // --- 业务变量 ---
         let isRecording = false;
         let anchorPoint = null;
-        let anchorCube = null;  // 起点方块（红）
-        let endCube = null;     // 终点方块（绿）- 新增全局变量以便清除
+        let anchorCube = null;
+        let endCube = null;
         let dynamicLine = null;
-        let directionArrow = null;  // 方向箭头
+        let directionArrow = null;
 
         // --- 3D 浮动标签变量 ---
         let hudSprite = null;
         let hudCanvas, hudContext, hudTexture;
 
-        // --- 数据录制变量 ---
-        let dataBuffer = [];
+        // --- 【核心】流式写入变量 ---
+        let fileHandle = null;
+        let writableStream = null;
+        let writeBuffer = ""; // 字符串缓存
+        let bufferCount = 0;
+        const BUFFER_FLUSH_THRESHOLD = 50; // 每攒够50条数据写一次硬盘（减少I/O频率）
+        
+        // --- 定时器 ---
         let lastRecordTime = 0;
-        const RECORD_INTERVAL = 15;
+        const RECORD_INTERVAL = 50; 
+
+        // 全局暴露给按钮调用
+        window.setupFileHandle = setupFileHandle;
 
         init();
         animate();
+
+        // --- 1. 新增：文件系统接入 ---
+        async function setupFileHandle() {
+            try {
+                // 弹出系统保存对话框
+                const options = {
+                    suggestedName: `quest_measure_${new Date().toISOString().slice(0,19).replace(/[:T]/g,"-")}.csv`,
+                    types: [{
+                        description: 'CSV Files',
+                        accept: { 'text/csv': ['.csv'] },
+                    }],
+                };
+                
+                // 这一步必须由用户点击触发
+                fileHandle = await window.showSaveFilePicker(options);
+                
+                // 创建写入流
+                writableStream = await fileHandle.createWritable();
+                
+                // 先写入表头
+                await writableStream.write("Timestamp,Distance(m),Pitch(deg),Yaw(deg)\n");
+                
+                // UI 更新
+                document.getElementById('setup-btn').style.display = 'none'; // 隐藏大按钮
+                document.getElementById('file-status').innerText = "硬盘写入模式：已就绪 (数据安全)";
+                updateStatus("第二步：点击下方 START XR 进入 VR");
+                
+            } catch (err) {
+                console.error(err);
+                alert("文件创建失败或被取消，请重试。错误：" + err.message);
+            }
+        }
 
         function init() {
             container = document.createElement('div');
@@ -115,11 +166,18 @@
                 }
             });
 
-            renderer.xr.addEventListener('sessionend', () => {
-  
-                if (dataBuffer.length > 0 && !window.hasDownloaded) {
-                    downloadCSV();
-                    window.hasDownloaded = true;
+            // 退出 VR 时，关闭文件流
+            renderer.xr.addEventListener('sessionend', async () => {
+                if (writableStream) {
+                    try {
+                        // 把剩余缓存写入
+                        if (writeBuffer.length > 0) await writableStream.write(writeBuffer);
+                        await writableStream.close();
+                        alert("录制结束，文件已保存到您的设备。");
+                    } catch(e) { console.error("关闭文件流失败", e); }
+                    
+                    // 重置页面状态
+                    window.location.reload(); 
                 }
             });
 
@@ -160,7 +218,6 @@
             initHUD();
 
             window.addEventListener('resize', onWindowResize);
-            window.downloadCSV = downloadCSV;
         }
 
         // --- 创建 3D 文字标签系统 ---
@@ -200,48 +257,44 @@
             hudSprite.visible = true;
         }
 
-        // --- 核心交互逻辑 ---
         function onTrigger() {
+            // 如果没选文件，拦截操作并提示
+            if (!writableStream) {
+                updateStatus("❌ 错误：请先退出 VR 并在网页上选择保存文件！");
+                return;
+            }
+
             const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
             if (!isRecording) {
-                // === 开始录制 (锚点设定) ===
+                // === 开始 ===
                 isRecording = true;
-                dataBuffer = [];
-
-                // 1. 【修改点】清除上一轮的方块（如果有）
-                if (anchorCube) {
-                    scene.remove(anchorCube);
-                    anchorCube = null;
-                }
-                if (endCube) {
-                    scene.remove(endCube);
-                    endCube = null;
-                }
-
-                // 2. 设定新锚点
+                writeBuffer = ""; // 清空缓存
+                bufferCount = 0;
+                
+                if (anchorCube) { scene.remove(anchorCube); anchorCube = null; }
+                if (endCube) { scene.remove(endCube); endCube = null; }
+                
                 anchorPoint = currentPos.clone();
-                anchorCube = createCube(anchorPoint, 0xff0000); // 红色半透明
+                anchorCube = createCube(anchorPoint, 0xff0000);
                 scene.add(anchorCube);
-
+                
                 dynamicLine.visible = true;
-                updateStatus("🔴 录制中...");
-
+                updateStatus("🔴 录制中 (硬盘直写)...");
+                
             } else {
-                // === 结束录制 ===
+                // === 结束 ===
                 isRecording = false;
-
-                // 3. 放置终点
-                endCube = createCube(currentPos, 0x00ff00); // 绿色半透明
+                
+                endCube = createCube(currentPos, 0x00ff00);
                 scene.add(endCube);
-
-                // 冻结
+                
                 updateLine(anchorPoint, currentPos);
-                hudSprite.visible = false;
-
-                updateStatus("✅ 录制完成，正在下载...");
-                downloadCSV();
-                window.hasDownloaded = true;
+                hudSprite.visible = false; 
+                
+                // 强制将剩余缓存写入硬盘
+                flushBufferToDisk(true);
+                updateStatus("✅ 录制暂停，数据已存入硬盘");
             }
         }
 
@@ -266,17 +319,52 @@
                 const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
                 updateLine(anchorPoint, currentPos);
-
                 const data = calculateRelativeData(anchorPoint, currentPos);
-
                 updateHUD(data, currentPos);
 
                 if (now - lastRecordTime >= RECORD_INTERVAL) {
-                    saveDataPoint(data);
+                    streamDataToDisk(data); // 使用新的流式写入函数
                     lastRecordTime = now;
                 }
             }
             renderer.render(scene, camera);
+        }
+
+        // --- 核心优化：流式写入逻辑 ---
+        function streamDataToDisk(data) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-GB') + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            
+            // 1. 拼接 CSV 字符串
+            const row = `${timeStr},${data.dist},${data.pitch},${data.yaw}\n`;
+            
+            // 2. 存入临时字符串缓存 (比数组更省内存)
+            writeBuffer += row;
+            bufferCount++;
+
+            // 3. 达到阈值（比如50条），一次性写入硬盘
+            if (bufferCount >= BUFFER_FLUSH_THRESHOLD) {
+                flushBufferToDisk();
+            }
+        }
+
+        // 真正的写盘操作（异步）
+        async function flushBufferToDisk(force = false) {
+            if (!writableStream || writeBuffer.length === 0) return;
+
+            const tempBuffer = writeBuffer;
+            
+            // 立即清空主缓存，防止还没写完又有新数据进来导致重复
+            writeBuffer = ""; 
+            bufferCount = 0;
+
+            try {
+                // 这步操作是写入系统文件缓存，不会占用 JS 堆内存
+                await writableStream.write(tempBuffer);
+            } catch (err) {
+                console.error("写入文件失败:", err);
+                updateStatus("❌ 写入失败，请检查存储权限");
+            }
         }
 
         function calculateRelativeData(pStart, pCurrent) {
@@ -294,11 +382,7 @@
             };
         }
 
-        function saveDataPoint(data) {
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString('en-GB') + '.' + String(now.getMilliseconds()).padStart(3, '0');
-            dataBuffer.push({ t: timeStr, ...data });
-        }
+
 
         function updateLine(p1, p2) {
             const pos = dynamicLine.geometry.attributes.position.array;
@@ -325,33 +409,7 @@
             document.getElementById('status').innerText = msg;
         }
 
-        function downloadCSV() {
-            if (dataBuffer.length === 0) {
-                updateStatus("⚠️ 无数据");
-                return;
-            }
-            let content = "Timestamp,Distance(m),Pitch(deg),Yaw(deg)\n";
-            dataBuffer.forEach(d => content += `${d.t},${d.dist},${d.pitch},${d.yaw}\n`);
 
-            const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
-            const link = document.createElement("a");
-            link.href = URL.createObjectURL(blob);
-            
-            // 使用标准日期时间格式：YYYY-MM-DD_HH-mm-ss
-            const now = new Date();
-            const dateStr = now.getFullYear() + '-' + 
-                           String(now.getMonth() + 1).padStart(2, '0') + '-' + 
-                           String(now.getDate()).padStart(2, '0') + '_' +
-                           String(now.getHours()).padStart(2, '0') + '-' +
-                           String(now.getMinutes()).padStart(2, '0') + '-' +
-                           String(now.getSeconds()).padStart(2, '0');
-            
-            link.download = `quest_track_${dateStr}.csv`;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-            updateStatus("✅ 已保存");
-        }
 
         function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
