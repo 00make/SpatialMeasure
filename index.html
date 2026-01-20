@@ -291,7 +291,7 @@
 
                 // 优化：HUD 更新频率限制 (节流)
                 // 纹理上传很费性能，限制在 100ms 更新一次 (10FPS) 对人眼足够了
-                if (now - lastHudUpdateTime > 100) {
+                if (now - lastHudUpdateTime > 50) {
                     const data = calculateRelativeData(anchorPoint, _tempVec3_1);
                     updateHUD(data, _tempVec3_1);
                     lastHudUpdateTime = now;
