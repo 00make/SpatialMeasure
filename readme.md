@@ -10,6 +10,7 @@
 * **技术栈**：Three.js (r150+), WebXR Device API
 * **渲染模式**：`immersive-ar` (必须开启 Passthrough 透视)
 
+
 ---
 
 ### 3. 功能模块详细说明
