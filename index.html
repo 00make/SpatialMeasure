@@ -2,7 +2,7 @@
 <html lang="zh">
 
 <head>
-    <title>Quest 3 空间测量 (多线程零卡顿版)</title>
+    <title>Quest 3 空间测量 (SSS透明版)</title>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <link rel="manifest" href="./manifest.json">
@@ -10,7 +10,7 @@
     <link type="text/css" rel="stylesheet" href="./static/css/main.css">
     <style>
         #info {
-            background: rgba(0, 0, 0, 0.6);
+            background: rgba(0, 0, 0, 0.3);
             padding: 10px;
             font-size: 14px;
             bottom: 20px;
@@ -26,39 +26,30 @@
             text-shadow: 1px 1px 2px black;
         }
 
-        #file-status {
-            margin-top: 5px;
-            color: #ffff00;
-            font-size: 14px;
-        }
-
-        #setup-btn {
+        #save-btn {
             position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            padding: 20px 40px;
-            background: #FF5722;
+            top: 20px;
+            right: 20px;
+            padding: 12px 24px;
+            background: #2196F3;
             color: white;
             border: none;
-            border-radius: 12px;
-            font-size: 20px;
-            font-weight: bold;
+            border-radius: 8px;
+            font-size: 16px;
             z-index: 999;
             pointer-events: auto;
             cursor: pointer;
-            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
         }
     </style>
 </head>
 
 <body>
-    <button id="setup-btn" onclick="setupFileHandle()">第一步：选择保存文件</button>
-
     <div id="info">
-        <div id="status">请先配置保存文件...</div>
-        <div id="file-status">未连接文件</div>
+        <div id="status">就绪 - 点击扳机键设定锚点</div>
     </div>
+
+    <button id="save-btn" onclick="downloadCSV()">下载数据</button>
 
     <script type="importmap">
         {
@@ -70,80 +61,7 @@
     </script>
 
     <script type="module">
-        // -----------------------------------------------------------
-        // 1. 定义 Worker 代码 (作为一个字符串 Blob，避免跨域和文件管理麻烦)
-        // -----------------------------------------------------------
-        const workerCode = `
-            let fileHandle = null;
-            let writable = null;
-            let buffer = "";
-            let bufferCount = 0;
-            const FLUSH_THRESHOLD = 50; // Worker 里可以稍微频繁点，反正不卡主线程
-
-            self.onmessage = async function(e) {
-                const msg = e.data;
-
-                if (msg.type === 'init') {
-                    // 初始化文件流
-                    try {
-                        fileHandle = msg.handle;
-                        writable = await fileHandle.createWritable();
-                        // 写入表头
-                        await writable.write("Timestamp,SegmentID,Distance(m),Pitch(deg),Yaw(deg)\\n");
-                        self.postMessage({ type: 'status', status: 'ready' });
-                    } catch (err) {
-                        self.postMessage({ type: 'error', error: err.message });
-                    }
-                } 
-                else if (msg.type === 'data') {
-                    // 接收数据并缓存
-                    buffer += msg.row;
-                    bufferCount++;
-
-                    if (bufferCount >= FLUSH_THRESHOLD) {
-                        flush();
-                    }
-                }
-                else if (msg.type === 'close') {
-                    // 强制写入并关闭
-                    await flush();
-                    if (writable) await writable.close();
-                    self.postMessage({ type: 'status', status: 'closed' });
-                }
-            };
-
-            async function flush() {
-                if (!writable || buffer.length === 0) return;
-                const dataToWrite = buffer;
-                buffer = "";
-                bufferCount = 0;
-                try {
-                    await writable.write(dataToWrite);
-                } catch(e) {
-                    console.error("Worker Write Error:", e);
-                }
-            }
-        `;
-
-        // 创建 Worker 实例
-        const blob = new Blob([workerCode], { type: "application/javascript" });
-        const worker = new Worker(URL.createObjectURL(blob));
-
-        // 监听 Worker 反馈
-        worker.onmessage = (e) => {
-            if (e.data.type === 'status' && e.data.status === 'closed') {
-                alert("录制结束，文件已安全保存。");
-                window.location.reload();
-            }
-            if (e.data.type === 'error') {
-                alert("文件写入错误: " + e.data.error);
-            }
-        };
-
-        // -----------------------------------------------------------
-        // 主程序逻辑
-        // -----------------------------------------------------------
-
+        // --- Service Worker 注册 ---
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js'));
         }
@@ -155,66 +73,32 @@
         let camera, scene, renderer;
         let controller;
 
-        // 业务变量
+        // --- 业务变量 ---
         let isRecording = false;
-        let currentSegmentID = 0;
         let anchorPoint = null;
-        let anchorCube = null;
-        let endCube = null;
+        let anchorCube = null;  // 起点方块（红）
+        let endCube = null;     // 终点方块（绿）- 新增全局变量以便清除
         let dynamicLine = null;
-        let directionArrow = null;
+        let directionArrow = null;  // 方向箭头
 
-        // 临时变量 (GC优化)
-        const _tempVec = new THREE.Vector3();
-        const _tempDir = new THREE.Vector3();
-        const _cameraPos = new THREE.Vector3();
-        const _arrowPos = new THREE.Vector3();
-        const _forwardDir = new THREE.Vector3(0, 0, -1);
-
-        // HUD
+        // --- 3D 浮动标签变量 ---
         let hudSprite = null;
         let hudCanvas, hudContext, hudTexture;
 
-        // 状态标记
-        let isFileReady = false;
-
+        // --- 数据录制变量 ---
+        let dataBuffer = [];
         let lastRecordTime = 0;
-        const RECORD_INTERVAL = 50;
-
-        window.setupFileHandle = setupFileHandle;
+        const RECORD_INTERVAL = 15;
 
         init();
         animate();
-
-        async function setupFileHandle() {
-            try {
-                const options = {
-                    suggestedName: `quest_measure_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`,
-                    types: [{ description: 'CSV Files', accept: { 'text/csv': ['.csv'] } }],
-                };
-
-                const handle = await window.showSaveFilePicker(options);
-
-                // 【关键】把 handle 发送给 Worker，主线程不再持有
-                worker.postMessage({ type: 'init', handle: handle });
-
-                isFileReady = true;
-
-                document.getElementById('setup-btn').style.display = 'none';
-                document.getElementById('file-status').innerText = "多线程写入模式 (高性能)";
-                updateStatus("第二步：点击下方 START XR 进入 VR");
-
-            } catch (err) {
-                console.error(err);
-                alert("文件配置失败：" + err.message);
-            }
-        }
 
         function init() {
             container = document.createElement('div');
             document.body.appendChild(container);
 
             scene = new THREE.Scene();
+            // AR 模式背景透明，无 scene.background
 
             camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 10);
             camera.position.set(0, 1.6, 3);
@@ -225,34 +109,46 @@
             renderer.xr.enabled = true;
 
             renderer.xr.addEventListener('sessionstart', () => {
-                if (directionArrow) directionArrow.visible = true;
+                // 进入XR空间时显示方向箭头
+                if (directionArrow) {
+                    directionArrow.visible = true;
+                }
             });
 
             renderer.xr.addEventListener('sessionend', () => {
-                // 告诉 Worker 关门送客
-                if (isFileReady) {
-                    worker.postMessage({ type: 'close' });
+
+                if (dataBuffer.length > 0 && !window.hasDownloaded) {
+                    downloadCSV();
+                    window.hasDownloaded = true;
                 }
             });
 
             container.appendChild(renderer.domElement);
+
             document.body.appendChild(XRButton.createButton(renderer, {
                 optionalFeatures: ['depth-sensing', 'dom-overlay'],
                 domOverlay: { root: document.body }
             }));
 
+            // --- 控制器 ---
             controller = renderer.xr.getController(0);
             controller.addEventListener('select', onTrigger);
             scene.add(controller);
 
-            // 辅助线和模型
+            // 控制器射线
             const lineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -0.5)]);
             const line = new THREE.Line(lineGeo, new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.5, transparent: true }));
             controller.add(line);
 
-            directionArrow = new THREE.ArrowHelper(_forwardDir, new THREE.Vector3(0, 1.6, 0), 0.5, 0x00ff00, 0.1, 0.05);
+            // --- 创建方向箭头 --- 
+            const arrowDir = new THREE.Vector3(0, 0, -1); // 朝向正前方
+            const arrowOrigin = new THREE.Vector3(0, 1.6, 2); // 显示在用户前方2米处
+            const arrowLength = 0.5; // 箭头长度
+            const arrowColor = 0x00ff00; // 箭头颜色
+            directionArrow = new THREE.ArrowHelper(arrowDir, arrowOrigin, arrowLength, arrowColor, 0.1, 0.05);
             scene.add(directionArrow);
 
+            // --- 初始化动态测量线 ---
             const measureLineMat = new THREE.LineBasicMaterial({ color: 0xffff00, linewidth: 2 });
             const measureLineGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, 0)]);
             dynamicLine = new THREE.Line(measureLineGeo, measureLineMat);
@@ -260,19 +156,20 @@
             dynamicLine.visible = false;
             scene.add(dynamicLine);
 
+            // --- 初始化 3D HUD 标签 ---
             initHUD();
+
             window.addEventListener('resize', onWindowResize);
+            window.downloadCSV = downloadCSV;
         }
 
+        // --- 创建 3D 文字标签系统 ---
         function initHUD() {
             hudCanvas = document.createElement('canvas');
             hudCanvas.width = 512;
             hudCanvas.height = 256;
             hudContext = hudCanvas.getContext('2d');
             hudTexture = new THREE.CanvasTexture(hudCanvas);
-            hudTexture.generateMipmaps = false;
-            hudTexture.minFilter = THREE.LinearFilter;
-
             const spriteMaterial = new THREE.SpriteMaterial({ map: hudTexture, transparent: true });
             hudSprite = new THREE.Sprite(spriteMaterial);
             hudSprite.scale.set(0.3, 0.15, 1);
@@ -282,105 +179,125 @@
 
         function updateHUD(data, position) {
             hudContext.clearRect(0, 0, hudCanvas.width, hudCanvas.height);
+
+            // 背景框稍微淡一点
             hudContext.fillStyle = 'rgba(0, 0, 0, 0.5)';
             hudContext.roundRect(10, 10, 492, 236, 30);
             hudContext.fill();
+
             hudContext.fillStyle = '#ffffff';
             hudContext.font = 'bold 50px Arial';
             hudContext.textAlign = 'left';
+
             hudContext.fillText(`Dist:  ${data.dist} m`, 40, 80);
             hudContext.fillText(`Pitch: ${data.pitch}°`, 40, 150);
             hudContext.fillText(`Yaw:   ${data.yaw}°`, 40, 220);
+
             hudTexture.needsUpdate = true;
+
             hudSprite.position.copy(position);
             hudSprite.position.y += 0.2;
             hudSprite.visible = true;
         }
 
+        // --- 核心交互逻辑 ---
         function onTrigger() {
-            if (!isFileReady) {
-                updateStatus("❌ 错误：未设置文件！");
-                return;
-            }
-
             const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
             if (!isRecording) {
-                // === 开始 ===
+                // === 开始录制 (锚点设定) ===
                 isRecording = true;
-                currentSegmentID++; // 线段编号 +1
+                dataBuffer = [];
 
-                disposeObject(anchorCube);
-                disposeObject(endCube);
-                anchorCube = null;
-                endCube = null;
+                // 1. 【修改点】清除上一轮的方块（如果有）
+                if (anchorCube) {
+                    scene.remove(anchorCube);
+                    anchorCube = null;
+                }
+                if (endCube) {
+                    scene.remove(endCube);
+                    endCube = null;
+                }
 
+                // 2. 设定新锚点
                 anchorPoint = currentPos.clone();
-                anchorCube = createCube(anchorPoint, 0xff0000);
+                anchorCube = createCube(anchorPoint, 0xff0000); // 红色半透明
                 scene.add(anchorCube);
 
                 dynamicLine.visible = true;
-                updateStatus(`🔴 录制中 (第${currentSegmentID}次)...`);
+                updateStatus("🔴 录制中...");
 
             } else {
-                // === 结束 ===
+                // === 结束录制 ===
                 isRecording = false;
-                endCube = createCube(currentPos, 0x00ff00);
+
+                // 3. 放置终点
+                endCube = createCube(currentPos, 0x00ff00); // 绿色半透明
                 scene.add(endCube);
 
+                // 冻结
                 updateLine(anchorPoint, currentPos);
                 hudSprite.visible = false;
 
-                // Worker 会处理剩下的，我们只需要更新 UI
-                updateStatus(`✅ 第${currentSegmentID}次保存完成`);
+                updateStatus("✅ 录制完成，正在下载...");
+                downloadCSV();
+                window.hasDownloaded = true;
             }
         }
 
         function render() {
+            // --- 更新方向箭头位置 --- 
             if (directionArrow && directionArrow.visible) {
-                camera.getWorldPosition(_cameraPos);
-                _arrowPos.set(_cameraPos.x, _cameraPos.y, _cameraPos.z - 2);
-                directionArrow.position.copy(_arrowPos);
+                // 获取相机位置
+                const cameraPos = new THREE.Vector3();
+                camera.getWorldPosition(cameraPos);
+
+                // 计算箭头位置：在相机前方2米处
+                const arrowPos = new THREE.Vector3(cameraPos.x, cameraPos.y, cameraPos.z - 2);
+                directionArrow.position.copy(arrowPos);
+
+                // 固定指向空间正前方90度方向（-z轴）
+                const forwardDir = new THREE.Vector3(0, 0, -1);
+                directionArrow.setDirection(forwardDir);
             }
 
             if (isRecording && controller && anchorPoint) {
                 const now = Date.now();
-                _tempVec.setFromMatrixPosition(controller.matrixWorld);
+                const currentPos = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
 
-                updateLine(anchorPoint, _tempVec);
-                const data = calculateRelativeData(anchorPoint, _tempVec);
-                updateHUD(data, _tempVec);
+                updateLine(anchorPoint, currentPos);
+
+                const data = calculateRelativeData(anchorPoint, currentPos);
+
+                updateHUD(data, currentPos);
 
                 if (now - lastRecordTime >= RECORD_INTERVAL) {
-                    // 【核心】直接丢给 Worker，主线程零负担
-                    sendDataToWorker(data);
+                    saveDataPoint(data);
                     lastRecordTime = now;
                 }
             }
             renderer.render(scene, camera);
         }
 
-        function sendDataToWorker(data) {
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString('en-GB') + '.' + String(now.getMilliseconds()).padStart(3, '0');
-            // 构造一行 CSV 字符串
-            const row = `${timeStr},${currentSegmentID},${data.dist},${data.pitch},${data.yaw}\n`;
-
-            // 发送消息
-            worker.postMessage({ type: 'data', row: row });
-        }
-
         function calculateRelativeData(pStart, pCurrent) {
-            _tempDir.subVectors(pCurrent, pStart);
-            const dist = _tempDir.length();
-            _tempDir.normalize();
-            const pitch = THREE.MathUtils.radToDeg(Math.asin(_tempDir.y));
-            const yaw = THREE.MathUtils.radToDeg(Math.atan2(_tempDir.z, _tempDir.x));
+            const direction = new THREE.Vector3().subVectors(pCurrent, pStart);
+            const dist = direction.length();
+            direction.normalize();
+
+            const pitch = THREE.MathUtils.radToDeg(Math.asin(direction.y));
+            const yaw = THREE.MathUtils.radToDeg(Math.atan2(direction.z, direction.x));
+
             return {
                 dist: dist.toFixed(3),
                 pitch: pitch.toFixed(1),
                 yaw: yaw.toFixed(1)
             };
+        }
+
+        function saveDataPoint(data) {
+            const now = new Date();
+            const timeStr = now.toLocaleTimeString('en-GB') + '.' + String(now.getMilliseconds()).padStart(3, '0');
+            dataBuffer.push({ t: timeStr, ...data });
         }
 
         function updateLine(p1, p2) {
@@ -390,19 +307,15 @@
             dynamicLine.geometry.attributes.position.needsUpdate = true;
         }
 
-        function disposeObject(obj) {
-            if (!obj) return;
-            if (obj.geometry) obj.geometry.dispose();
-            if (obj.material) {
-                if (Array.isArray(obj.material)) obj.material.forEach(m => m.dispose());
-                else obj.material.dispose();
-            }
-            scene.remove(obj);
-        }
-
+        // --- 【修改点】支持半透明方块 ---
         function createCube(pos, color) {
             const geo = new THREE.BoxGeometry(0.05, 0.05, 0.05);
-            const mat = new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.5 });
+            // 这里增加了 transparent 和 opacity
+            const mat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.5
+            });
             const mesh = new THREE.Mesh(geo, mat);
             mesh.position.copy(pos);
             return mesh;
@@ -410,6 +323,34 @@
 
         function updateStatus(msg) {
             document.getElementById('status').innerText = msg;
+        }
+
+        function downloadCSV() {
+            if (dataBuffer.length === 0) {
+                updateStatus("⚠️ 无数据");
+                return;
+            }
+            let content = "Timestamp,Distance(m),Pitch(deg),Yaw(deg)\n";
+            dataBuffer.forEach(d => content += `${d.t},${d.dist},${d.pitch},${d.yaw}\n`);
+
+            const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            link.href = URL.createObjectURL(blob);
+
+            // 使用标准日期时间格式：YYYY-MM-DD_HH-mm-ss
+            const now = new Date();
+            const dateStr = now.getFullYear() + '-' +
+                String(now.getMonth() + 1).padStart(2, '0') + '-' +
+                String(now.getDate()).padStart(2, '0') + '_' +
+                String(now.getHours()).padStart(2, '0') + '-' +
+                String(now.getMinutes()).padStart(2, '0') + '-' +
+                String(now.getSeconds()).padStart(2, '0');
+
+            link.download = `quest_track_${dateStr}.csv`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            updateStatus("✅ 已保存");
         }
 
         function onWindowResize() {
